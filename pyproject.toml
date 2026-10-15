@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-v"
-version = "0.1.0"
+version = "0.2.0"
 description = "A small CLI agent with a shared reasoning server and local tools"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -29,3 +29,8 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+# Explicit source archive allowlist: never package local credentials or server databases.
+[tool.hatch.build.targets.sdist]
+include = ["src/agent_v", "tests", "scripts", "release", "README.md", "INSTALL.md",
+           "RELEASING.md", "pyproject.toml", "uv.lock", ".env.example"]

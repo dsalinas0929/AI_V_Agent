@@ -3,6 +3,7 @@
 import asyncio
 import os
 import sqlite3
+from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated
 
@@ -10,11 +11,12 @@ import httpx
 import typer
 import uvicorn
 from rich.console import Console
-from websockets.exceptions import WebSocketException
+from websockets.exceptions import InvalidStatus, WebSocketException
 
 from agent_v.client import chat as run_chat
 from agent_v.client import safe_text, validate_server
 from agent_v.config import model_config
+from agent_v.settings import connection_settings, save_settings, settings_path
 from agent_v.store import Store
 
 app = typer.Typer(no_args_is_help=True, help="Agent V — a small client/server CLI agent.")
@@ -27,10 +29,70 @@ def database() -> Store:
     return Store(os.getenv("AGENT_V_DB", ".agent-v/server.sqlite3"))
 
 
-def require_token(token):
-    if not token:
-        raise typer.BadParameter("Set AGENT_V_TOKEN to your server-issued access token.")
-    return token
+@app.callback(invoke_without_command=True)
+def main(show_version: bool = typer.Option(False, "--version", is_eager=True)):
+    """Agent V client and server commands."""
+    if show_version:
+        typer.echo(f"Agent V {version('agent-v')}")
+        raise typer.Exit()
+
+
+def require_connection(server, token):
+    try:
+        return connection_settings(server, token)
+    except (ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from None
+
+
+def check_connection(server: str, token: str):
+    try:
+        response = httpx.get(
+            server + "/sessions",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+            follow_redirects=False,
+        )
+        if response.status_code in {401, 403}:
+            raise ValueError(
+                "Access token rejected. Ask your administrator for a token from this server."
+            )
+        response.raise_for_status()
+        if not isinstance(response.json(), list):
+            raise ValueError("This address did not return an Agent V sessions response.")
+    except httpx.HTTPError:
+        raise ValueError("Cannot reach Agent V. Check the server address or SSH tunnel.") from None
+
+
+@app.command()
+def setup():
+    """Save your server address and user token after checking the connection."""
+    console.print("Enter the server address and Agent V user token supplied by your administrator.")
+    console.print("The token is saved in your user profile for future connections.")
+    server = typer.prompt("Server URL", default="http://127.0.0.1:18000").strip()
+    token = typer.prompt("Agent V access token (not a model API key)", hide_input=True).strip()
+    try:
+        server = validate_server(server)
+        if not token or token.startswith("gm_live_"):
+            raise ValueError("Enter an Agent V user token, not a SayGM API key.")
+        check_connection(server, token)
+        save_settings(server, token)
+    except (OSError, ValueError) as exc:
+        console.print(f"Setup failed: {safe_text(str(exc))}", markup=False)
+        raise typer.Exit(1)
+    console.print("Connected and saved. Open your project folder, then run: agent-v chat")
+    if os.getenv("AGENT_V_SERVER") or os.getenv("AGENT_V_TOKEN"):
+        console.print(
+            "Existing AGENT_V_SERVER / AGENT_V_TOKEN environment variables override setup."
+        )
+
+
+@app.command()
+def logout():
+    """Remove the saved address and token from this computer."""
+    settings_path().unlink(missing_ok=True)
+    console.print(
+        "Saved connection removed. Environment variables and server tokens are unchanged."
+    )
 
 
 @app.command()
@@ -93,15 +155,21 @@ TokenOption = Annotated[str, typer.Option(envvar="AGENT_V_TOKEN", show_envvar=Tr
 
 @app.command()
 def chat(
-    server: ServerOption = "http://127.0.0.1:8000",
+    server: ServerOption = "",
     token: TokenOption = "",
     workspace: Path = typer.Option(Path("."), exists=True, file_okay=False, resolve_path=True),
     session: str | None = typer.Option(None, help="Resume an existing session ID."),
 ):
     """Chat and perform approved actions in a local workspace."""
-    require_token(token)
+    server, token = require_connection(server, token)
     try:
         asyncio.run(run_chat(server, token, workspace.resolve(), session))
+    except InvalidStatus as exc:
+        if exc.response.status_code in {401, 403}:
+            console.print("Access token rejected. Run agent-v setup with a token from this server.")
+        else:
+            console.print(f"Server rejected the connection (HTTP {exc.response.status_code}).")
+        raise typer.Exit(1)
     except (OSError, ValueError, RuntimeError, WebSocketException) as exc:
         console.print(f"Connection error: {safe_text(str(exc))}", markup=False)
         raise typer.Exit(1)
@@ -110,9 +178,9 @@ def chat(
 
 
 @app.command()
-def sessions(server: ServerOption = "http://127.0.0.1:8000", token: TokenOption = ""):
+def sessions(server: ServerOption = "", token: TokenOption = ""):
     """List your most recent sessions and their workspace paths."""
-    require_token(token)
+    server, token = require_connection(server, token)
     try:
         server = validate_server(server)
         response = httpx.get(
@@ -135,3 +203,15 @@ def sessions(server: ServerOption = "http://127.0.0.1:8000", token: TokenOption 
     except (httpx.HTTPError, ValueError) as exc:
         console.print(f"Cannot list sessions: {safe_text(str(exc))}", markup=False)
         raise typer.Exit(1)
+
+
+@app.command()
+def doctor(server: ServerOption = "", token: TokenOption = ""):
+    """Check server access without calling the AI model or spending model credit."""
+    server, token = require_connection(server, token)
+    try:
+        check_connection(server, token)
+    except ValueError as exc:
+        console.print(safe_text(str(exc)), markup=False)
+        raise typer.Exit(1)
+    console.print("Connection and user token OK. No AI request was made.")

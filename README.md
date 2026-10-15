@@ -2,6 +2,11 @@
 
 A small Python CLI agent with a shared FastAPI server and local, approval-controlled tools.
 
+**Installing the client? Start with [INSTALL.md](INSTALL.md).** The release installer handles Python
+and dependencies; `agent-v setup` saves your connection so you can run `agent-v chat` in any folder.
+Server administrators and developers can follow the source setup below. To build a downloadable
+client release, see [RELEASING.md](RELEASING.md).
+
 ```mermaid
 flowchart LR
     CLI[CLI on each PC] <-->|Authenticated WebSocket| Server[FastAPI agent loop]
@@ -356,7 +361,7 @@ To distribute the CLI, build a wheel and install it on each PC (with Python 3.11
 
 ```sh
 uv build
-uv tool install dist/agent_v-0.1.0-py3-none-any.whl
+uv tool install dist/agent_v-0.2.0-py3-none-any.whl
 ```
 
 Alternatively, from a source checkout, use `uv tool install .`. The single package includes both
@@ -365,6 +370,9 @@ client and server commands; client users need only their server URL and access t
 ## Configuration and limits
 
 Environment variables are read directly; `.env.example` is a template, not an auto-loaded file.
+Client `setup` saves the address/token in the user profile. For chat, sessions, and doctor, explicit
+options override environment variables, which override saved settings. A saved token is never
+automatically reused for a different server URL. See INSTALL.md for settings paths and removal.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -400,7 +408,7 @@ access rights. Windows uses its default shell; macOS/Linux use `/bin/sh` semanti
 
 SQLite stores conversation and tool data in plaintext on the server. Use a trusted server and
 protect its disk/backups. Native executables, OAuth, automatic reconnect, secret scanning,
-conversation deletion UI, and multi-process scaling are outside this first version.
+conversation deletion UI, and multi-process scaling are outside this version.
 
 ## Development
 
