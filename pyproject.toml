@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-v"
-version = "0.2.0"
+version = "0.5.0"
 description = "A small CLI agent with a shared reasoning server and local tools"
 readme = "README.md"
 requires-python = ">=3.11"

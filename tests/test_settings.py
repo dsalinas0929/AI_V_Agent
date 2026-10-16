@@ -81,17 +81,22 @@ def test_setup_rejects_provider_key(config_file):
     assert "gm_live_test" not in result.output
 
 
-def test_chat_uses_saved_connection(config_file, monkeypatch):
+@pytest.mark.parametrize("automatic", [None, False, True])
+def test_chat_uses_saved_connection(config_file, monkeypatch, automatic):
     save_settings("https://server.example", "saved-token")
     seen = []
 
-    async def fake_chat(server, token, workspace, session_id):
-        seen.append((server, token, workspace, session_id))
+    async def fake_chat(server, token, workspace, session_id, allow_server_commands=False):
+        seen.append((server, token, workspace, session_id, allow_server_commands))
 
     monkeypatch.setattr("agent_v.cli.run_chat", fake_chat)
-    result = CliRunner().invoke(app, ["chat", "--workspace", str(config_file.parent)])
+    args = ["chat", "--workspace", str(config_file.parent)]
+    if automatic is not None:
+        args.append("--allow-server-commands" if automatic else "--ask-server-commands")
+    result = CliRunner().invoke(app, args)
     assert result.exit_code == 0, result.output
     assert seen[0][:2] == ("https://server.example", "saved-token")
+    assert seen[0][4] == (automatic is not False)
 
 
 def test_version_does_not_need_setup(config_file):

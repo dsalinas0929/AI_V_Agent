@@ -15,11 +15,11 @@ uv run ruff check src tests scripts
 uv run python scripts/build_release.py
 ```
 
-For version 0.2.0 this produces:
+For version 0.5.0 this produces:
 
-- `dist/agent-v-0.2.0-client.zip`: installers, wheel, installation guide, and bundled checksums.
-- `dist/agent-v-0.2.0-client.zip.sha256`: checksum for the ZIP.
-- `dist/agent_v-0.2.0-py3-none-any.whl`: package for manual installation.
+- `dist/agent-v-0.5.0-client.zip`: installers, wheel, installation guide, and bundled checksums.
+- `dist/agent-v-0.5.0-client.zip.sha256`: checksum for the ZIP.
+- `dist/agent_v-0.5.0-py3-none-any.whl`: package for manual installation.
 
 The builder uses an explicit allowlist. It does not include `.venv`, `.agent-v`, `.env`, databases,
 local notes, provider credentials, or client settings. The wheel is platform-independent Python;
@@ -33,7 +33,7 @@ is required. The app package still includes server commands, but ordinary users 
    `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1`.
 2. Run `agent-v --version`, `agent-v setup`, `agent-v doctor`, and a chat/tool round trip against your
    test server. Verify an upgrade retains settings and `agent-v logout` removes them.
-3. In GitHub, create a release for the intended commit/tag (for this version, `v0.2.0`). Attach the
+3. In GitHub, create a release for the intended commit/tag (for this version, `v0.5.0`). Attach the
    client ZIP and its `.sha256` file. Include the wheel if you want a manual-install option.
 4. Link users to that release and [INSTALL.md](INSTALL.md), and send each user's token privately.
 
@@ -48,7 +48,7 @@ and update versioned examples in INSTALL.md, README.md, and this file. Rebuild i
 For users who already have uv:
 
 ```sh
-uv tool install --reinstall --python 3.13 /path/to/agent_v-0.2.0-py3-none-any.whl
+uv tool install --reinstall --python 3.13 /path/to/agent_v-0.5.0-py3-none-any.whl
 uv tool update-shell
 ```
 

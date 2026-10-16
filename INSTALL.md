@@ -20,7 +20,7 @@ If your administrator provides an SSH tunnel instead of an HTTPS address, follow
 
 ## 2. Download and install
 
-Get `agent-v-0.2.0-client.zip` from your administrator or the repository's
+Get `agent-v-0.5.0-client.zip` from your administrator or the repository's
 [Releases page](https://github.com/dsalinas0929/AI_V_Agent/releases) **once published**.
 Choose the client ZIP under release assets, not GitHub's automatically generated source ZIP.
 Extract the ZIP into a new folder. Inside are `install.sh`, `install.ps1`, `INSTALL.md`, a wheel
@@ -36,7 +36,7 @@ This is an installer bundle, not an offline standalone executable.
 Open **Terminal** (search for it with Spotlight). If you extracted the ZIP in Downloads:
 
 ```sh
-cd ~/Downloads/agent-v-0.2.0-client
+cd ~/Downloads/agent-v-0.5.0-client
 bash install.sh
 ```
 
@@ -73,7 +73,7 @@ On any platform:
 agent-v --version
 ```
 
-It should print `Agent V 0.2.0`. If the command is not found, see troubleshooting below.
+It should print `Agent V 0.5.0`. If the command is not found, see troubleshooting below.
 
 ## 3. Connect once
 
@@ -166,6 +166,34 @@ token. Then run `agent-v chat` in your local project folder.
 The tunnel encrypts the connection to the server. Reopen the tunnel each time you want to use
 the client; the saved setup details remain. Your administrator should keep the server listening
 on `127.0.0.1:8000`. You do not need public access to VPS port 8000.
+
+## Commands sent by your administrator
+
+While `agent-v chat` is connected and idle, the server administrator can send a command request.
+**Starting with version 0.5.0, server commands run automatically by default.** No extra flag is
+needed. The terminal announces automatic mode and displays every command and its result.
+Execution happens on your PC in the selected workspace with your OS permissions. Results return
+to the administrator. No model request is needed for this feature.
+
+Normal launch:
+
+```sh
+agent-v chat
+```
+
+This trusts the server administrator to run shell commands on your computer. AI-requested commands
+and edits still require approval. To explicitly request server-command prompts for one connection:
+
+```sh
+agent-v chat --ask-server-commands
+```
+
+The previous `--allow-server-commands` flag is still accepted but unnecessary. Approval prompts are
+an Agent V feature, not macOS permission dialogs; OS access restrictions remain in effect.
+
+You can use `/cancel` to stop the request or `/quit` to disconnect. Actions already completed are
+not undone. Commands cannot be delivered while you are offline. Your ordinary client token is
+sufficient; never enter an administrator token in client setup.
 
 ## Updates and removal
 

@@ -260,6 +260,99 @@ in a fresh terminal. Enter `/quit` to close the client, then Ctrl+C in the tunne
 the tunnel. The server remains running while its VPS terminal stays open; this walkthrough runs
 it in the foreground, not as an automatically restarted service.
 
+## Send a command from the server to a client
+
+The administrator command feature uses the existing client WebSocket and does not call the AI
+model. Starting with version 0.5.0, server commands run automatically by default. There is no background agent,
+offline queue, broadcast, or automatic retry. Clients must be connected with `agent-v chat`.
+
+### 1. Enable the feature on the server
+
+Update the server source and run `uv sync --locked`. Generate a separate random admin token:
+
+```sh
+uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+Keep the token private. It is different from both the provider API key and ordinary client tokens.
+In Bash on the VPS, load it through a hidden prompt, then restart Agent V:
+
+```bash
+read -rs -p 'Admin token: ' AGENT_V_ADMIN_TOKEN
+printf '\n'
+export AGENT_V_ADMIN_TOKEN
+uv run agent-v serve --ask-api-key
+```
+
+Paste the generated token when prompted. Use `serve --demo` instead if testing without model
+access. This feature is disabled when `AGENT_V_ADMIN_TOKEN` is unset, and rejects configured tokens
+shorter than 32 characters. Keep using the same database path and provider settings as before.
+
+### 2. Connect the updated client
+
+Install the 0.5.0 client release (see INSTALL.md), or update its source and run `uv sync --locked`.
+On the client's PC, run:
+
+```sh
+agent-v chat --workspace .
+```
+
+From a source checkout, use `uv run agent-v chat --workspace .`.
+**Server commands run automatically by default**, without a flag or a per-command approval prompt.
+This trusts the connected server administrator to execute shell commands with the client's OS
+permissions. Startup announces automatic mode, and each command and its result remain visible.
+AI-requested commands and edits still require approval. OS-level access restrictions remain in effect.
+
+To explicitly request server-command approval prompts for one connection, use
+`agent-v chat --ask-server-commands`. The previous `--allow-server-commands` flag still works but
+is no longer necessary. This behavior also works with a 0.3.0 server; the wire protocol is unchanged.
+Clients older than 0.3.0 cannot receive administrator commands.
+
+### 3. List clients and send a command
+
+In another **server terminal**, from the project directory, load the same admin token:
+
+```bash
+read -rs -p 'Admin token: ' AGENT_V_ADMIN_TOKEN
+printf '\n'
+export AGENT_V_ADMIN_TOKEN
+uv run agent-v clients --server http://127.0.0.1:8000
+```
+
+The list shows each client's ID, username, workspace, and busy/idle state. Select an idle client:
+
+```sh
+uv run agent-v send-command CLIENT_ID --server http://127.0.0.1:8000 --command 'echo hello'
+```
+
+Replace `CLIENT_ID` with an ID from the list. IDs identify individual live connections and change
+on reconnect, so two PCs using the same username can still be targeted separately. Quote commands
+to prevent your administrator shell from expanding them before sending them.
+
+On the client, the user sees **“Command requested by the server administrator”**, the exact command,
+and execution starts automatically. When launched with `--ask-server-commands`, the client instead
+asks for `y` approval; another answer denies the command. The result
+is shown on the client and returned to the waiting admin command, including combined stdout/stderr,
+exit code, timeout, and truncation status. Commands use the client's shell, so choose syntax that
+works on the target OS.
+
+Limits and behavior:
+
+- Busy clients/sessions reject new commands; commands do not interrupt a chat turn.
+- The administrator waits up to five minutes including approval. Local execution still has the
+  existing 60-second limit and 16 KiB output limit.
+- `/cancel`, `/quit`, or a lost connection stops pending work where possible; completed effects
+  cannot be undone. If the administrator loses the HTTP response, check the client before retrying.
+- Results are returned directly and are not saved into AI conversation history or sent to the model.
+- Commands are not sandboxed beyond the user's OS permissions. Server commands execute automatically
+  unless the client is launched with `--ask-server-commands`.
+- Restarting the server clears the online-client list; clients must reconnect.
+
+Admin API: `GET /admin/clients` and `POST /admin/clients/{id}/command` with JSON
+`{"command":"echo hello"}`. Both require `Authorization: Bearer <admin-token>`. Ordinary client tokens
+cannot use these endpoints. The POST waits for the result; use the local server URL on the VPS to
+avoid reverse-proxy request timeouts. Do not place the admin token in client configuration.
+
 ## Troubleshooting
 
 ### Linux: `.venv/bin/python` reports “Permission denied”
@@ -361,7 +454,7 @@ To distribute the CLI, build a wheel and install it on each PC (with Python 3.11
 
 ```sh
 uv build
-uv tool install dist/agent_v-0.2.0-py3-none-any.whl
+uv tool install dist/agent_v-0.5.0-py3-none-any.whl
 ```
 
 Alternatively, from a source checkout, use `uv tool install .`. The single package includes both
@@ -384,6 +477,7 @@ automatically reused for a different server URL. See INSTALL.md for settings pat
 | `AGENT_V_RPM` | `5` | Shared model requests per minute |
 | `AGENT_V_SERVER` | `http://127.0.0.1:8000` | Client server URL |
 | `AGENT_V_TOKEN` | Required for clients | User access token |
+| `AGENT_V_ADMIN_TOKEN` | Unset (feature disabled) | Separate server/admin-only token for client commands |
 
 Use an absolute `AGENT_V_DB` path when running admin commands from different directories.
 All clients share the provider project's quota. A single agent turn can use multiple model

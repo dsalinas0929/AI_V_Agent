@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import sqlite3
 from importlib.metadata import version
 from pathlib import Path
@@ -159,11 +160,24 @@ def chat(
     token: TokenOption = "",
     workspace: Path = typer.Option(Path("."), exists=True, file_okay=False, resolve_path=True),
     session: str | None = typer.Option(None, help="Resume an existing session ID."),
+    allow_server_commands: bool = typer.Option(
+        True,
+        "--allow-server-commands/--ask-server-commands",
+        help="Server commands run automatically by default; --ask-server-commands enables prompts.",
+    ),
 ):
     """Chat and perform approved actions in a local workspace."""
     server, token = require_connection(server, token)
     try:
-        asyncio.run(run_chat(server, token, workspace.resolve(), session))
+        asyncio.run(
+            run_chat(
+                server,
+                token,
+                workspace.resolve(),
+                session,
+                allow_server_commands=allow_server_commands,
+            )
+        )
     except InvalidStatus as exc:
         if exc.response.status_code in {401, 403}:
             console.print("Access token rejected. Run agent-v setup with a token from this server.")
@@ -215,3 +229,86 @@ def doctor(server: ServerOption = "", token: TokenOption = ""):
         console.print(safe_text(str(exc)), markup=False)
         raise typer.Exit(1)
     console.print("Connection and user token OK. No AI request was made.")
+
+
+AdminTokenOption = Annotated[str, typer.Option(envvar="AGENT_V_ADMIN_TOKEN", show_envvar=True)]
+
+
+def admin_request(method: str, server: str, admin_token: str, path: str, body=None):
+    if not admin_token:
+        raise typer.BadParameter("Set AGENT_V_ADMIN_TOKEN to the server's admin token.")
+    try:
+        server = validate_server(server)
+        response = httpx.request(
+            method,
+            server + path,
+            json=body,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            timeout=310,
+            follow_redirects=False,
+        )
+        if response.is_error:
+            detail = response.json().get("detail", "Request rejected")
+            console.print(f"Server: {safe_text(str(detail))}", markup=False)
+            raise typer.Exit(1)
+        response.raise_for_status()
+        return response.json()
+    except (httpx.HTTPError, ValueError):
+        console.print(
+            "Admin request failed. Check the connection; a submitted command may still be running. "
+            "Do not resend without checking the client."
+        )
+        raise typer.Exit(1)
+
+
+@app.command()
+def clients(
+    server: ServerOption = "http://127.0.0.1:8000",
+    admin_token: AdminTokenOption = "",
+):
+    """Admin: list connected clients. Run on the server with its admin token."""
+    rows = admin_request("GET", server, admin_token, "/admin/clients")
+    if not rows:
+        console.print("No connected clients.")
+    for row in rows:
+        state = "busy" if row["busy"] else "idle"
+        if not row["command_support"]:
+            state = "upgrade required"
+        console.print(
+            safe_text(f"{row['id']}  {row['user']}  {state}\n  {row['workspace']}"), markup=False
+        )
+
+
+@app.command("send-command")
+def send_command(
+    client_id: str,
+    command: str = typer.Option(
+        ..., "--command", "-c", help="Exact shell command to ask the client to run."
+    ),
+    server: ServerOption = "http://127.0.0.1:8000",
+    admin_token: AdminTokenOption = "",
+):
+    """Admin: ask one online client to approve/run a command and wait for its result."""
+    if not re.fullmatch(r"[a-f0-9]{32}", client_id):
+        raise typer.BadParameter("Use a client ID from agent-v clients.")
+    if not command.strip() or len(command) > 8192:
+        raise typer.BadParameter("Command must contain 1 to 8192 characters.")
+    console.print("Waiting for the client's approval and result (up to 5 minutes)...")
+    result = admin_request(
+        "POST",
+        server,
+        admin_token,
+        f"/admin/clients/{client_id}/command",
+        {"command": command},
+    )["result"]
+    if "error" in result:
+        console.print(safe_text(str(result["error"])), markup=False)
+        raise typer.Exit(1)
+    console.print(safe_text(str(result.get("output", ""))), markup=False)
+    console.print(
+        f"Exit: {result.get('exit_code')} | Timed out: {result.get('timed_out')} "
+        f"| Output truncated: {result.get('truncated')}",
+        markup=False,
+    )
+    if result.get("timed_out") or result.get("exit_code") != 0:
+        raise typer.Exit(1)

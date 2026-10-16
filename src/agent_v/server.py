@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager, suppress
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -19,6 +20,7 @@ from agent_v.store import Store
 logger = logging.getLogger(__name__)
 MAX_FRAME = 262_144
 MAX_CONTEXT = 120_000
+COMMAND_TIMEOUT = 300
 
 
 class Frame(BaseModel):
@@ -29,11 +31,17 @@ class Start(Frame):
     type: Literal["start"]
     workspace: str = Field(min_length=1, max_length=4096)
     session_id: str | None = Field(default=None, max_length=64)
+    command_support: bool = False
 
 
 class Chat(Frame):
     type: Literal["chat"]
     text: str = Field(min_length=1, max_length=16_000)
+
+
+class CommandRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    command: str = Field(min_length=1, max_length=8192)
 
 
 class Cancel(Frame):
@@ -53,6 +61,10 @@ def create_app(store: Store | None = None, model=None, rpm: int | None = None):
     store = store or Store(os.getenv("AGENT_V_DB", ".agent-v/server.sqlite3"))
     limiter = RateLimiter(rpm or max(1, int(os.getenv("AGENT_V_RPM", "5"))))
     active: dict[str, str] = {}
+    connected: dict[str, dict] = {}
+    admin_token = os.getenv("AGENT_V_ADMIN_TOKEN", "")
+    if admin_token and len(admin_token) < 32:
+        raise ValueError("AGENT_V_ADMIN_TOKEN must contain at least 32 characters.")
 
     @asynccontextmanager
     async def lifespan(app):
@@ -68,6 +80,37 @@ def create_app(store: Store | None = None, model=None, rpm: int | None = None):
         if not header or not header.startswith("Bearer "):
             return None
         return store.authenticate(header[7:])
+
+    def require_admin(header):
+        if not admin_token:
+            raise HTTPException(503, "Server commands are disabled. Set AGENT_V_ADMIN_TOKEN.")
+        supplied = header[7:] if header and header.startswith("Bearer ") else ""
+        if not secrets.compare_digest(supplied.encode(), admin_token.encode()):
+            raise HTTPException(403, "Admin authentication required")
+
+    @app.get("/admin/clients")
+    async def clients(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return [
+            {"id": identifier, **entry["info"], "busy": entry["busy"]()}
+            for identifier, entry in connected.items()
+            if entry["authorized"]()
+        ]
+
+    @app.post("/admin/clients/{client_id}/command")
+    async def command(
+        client_id: str,
+        body: CommandRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        entry = connected.get(client_id)
+        if entry is None or not entry["authorized"]():
+            raise HTTPException(404, "Client is offline or its token was revoked")
+        if not entry["info"]["command_support"]:
+            raise HTTPException(409, "Upgrade this client to support server commands")
+        result = await entry["dispatch"](body.command)
+        return {"client_id": client_id, "result": result}
 
     @app.get("/health")
     async def health():
@@ -95,6 +138,63 @@ def create_app(store: Store | None = None, model=None, rpm: int | None = None):
 
         async def emit(event):
             await ws.send_json(event)
+
+        def busy():
+            return (task is not None and not task.done()) or session_id in active
+
+        async def run_command(command_text):
+            request_id = uuid4().hex
+            future = asyncio.get_running_loop().create_future()
+            pending[request_id] = future
+            cancelled = False
+            try:
+                async with asyncio.timeout(COMMAND_TIMEOUT):
+                    await emit(
+                        {
+                            "type": "tool_request",
+                            "origin": "server",
+                            "id": request_id,
+                            "name": "run_command",
+                            "args": {"command": command_text},
+                        }
+                    )
+                    return await future
+            except TimeoutError:
+                await emit({"type": "error", "message": "Server command expired after 5 minutes."})
+                return {
+                    "error": "Command expired; execution may have started. Do not retry blindly."
+                }
+            except asyncio.CancelledError:
+                cancelled = True
+                return {
+                    "error": "Client cancelled or disconnected; completed actions are not undone."
+                }
+            except (WebSocketDisconnect, RuntimeError, OSError):
+                return {"error": "Client connection lost; execution status is unknown."}
+            finally:
+                pending.pop(request_id, None)
+                if active.get(session_id) == connection_id:
+                    active.pop(session_id, None)
+                if not cancelled:
+                    with suppress(WebSocketDisconnect, RuntimeError, OSError):
+                        await emit({"type": "done"})
+
+        async def dispatch(command_text):
+            nonlocal task
+            if busy():
+                raise HTTPException(409, "Client or session is busy. Wait until it is idle.")
+            if len(active) >= 4:
+                raise HTTPException(409, "Server is busy. Try again later.")
+            active[session_id] = connection_id
+            task = asyncio.create_task(run_command(command_text))
+            # Closing the admin HTTP request must not replay or silently cancel a local action.
+            submitted = task
+            try:
+                return await asyncio.shield(submitted)
+            except asyncio.CancelledError:
+                if submitted.cancelled():
+                    return {"error": "Client cancelled or disconnected before dispatch completed."}
+                raise
 
         async def run_turn(message):
             session = store.session(session_id, owner)
@@ -223,7 +323,25 @@ def create_app(store: Store | None = None, model=None, rpm: int | None = None):
                         candidate = store.create_session(owner, frame.workspace)
                         session = store.session(candidate, owner)
                     session_id = candidate
-                    await emit({"type": "session", "id": session_id, "history": session["history"]})
+                    await emit(
+                        {
+                            "type": "session",
+                            "id": session_id,
+                            "client_id": connection_id,
+                            "history": session["history"],
+                        }
+                    )
+                    connected[connection_id] = {
+                        "info": {
+                            "user": owner,
+                            "workspace": frame.workspace,
+                            "session_id": session_id,
+                            "command_support": frame.command_support,
+                        },
+                        "busy": busy,
+                        "dispatch": dispatch,
+                        "authorized": lambda: authenticate(header) == owner,
+                    }
                 elif isinstance(frame, Chat):
                     if not session_id:
                         await emit({"type": "error", "message": "Start a session first."})
@@ -253,6 +371,7 @@ def create_app(store: Store | None = None, model=None, rpm: int | None = None):
         except WebSocketDisconnect:
             pass
         finally:
+            connected.pop(connection_id, None)
             if task:
                 task.cancel()
                 with suppress(asyncio.CancelledError, WebSocketDisconnect, RuntimeError):

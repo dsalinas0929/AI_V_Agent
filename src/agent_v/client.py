@@ -42,7 +42,13 @@ def show_history(history):
             console.print(f"{item['role']}: {safe_text(text)}", markup=False)
 
 
-async def chat(server: str, token: str, workspace: Path, session_id: str | None):
+async def chat(
+    server: str,
+    token: str,
+    workspace: Path,
+    session_id: str | None,
+    allow_server_commands: bool = True,
+):
     server = validate_server(server)
     socket_url = (
         ("wss" if server.startswith("https:") else "ws") + server[server.index(":") :] + "/ws"
@@ -57,14 +63,32 @@ async def chat(server: str, token: str, workspace: Path, session_id: str | None)
         async def send(event):
             await ws.send(json.dumps(event))
 
-        await send({"type": "start", "workspace": str(workspace), "session_id": session_id})
+        await send(
+            {
+                "type": "start",
+                "workspace": str(workspace),
+                "session_id": session_id,
+                "command_support": True,
+            }
+        )
         initial = json.loads(await ws.recv())
         if initial["type"] != "session":
             raise ValueError(initial.get("message", "Could not open session."))
         console.print(f"Session: {initial['id']}\nWorkspace: {workspace}", markup=False)
+        if initial.get("client_id"):
+            console.print(f"Client ID: {initial['client_id']}", markup=False)
         show_history(initial["history"])
-        console.print("/new · /cancel · /quit · Ctrl+C cancels; edits/commands ask for y/N")
+        console.print("/new · /cancel · /quit · Ctrl+C cancels; AI edits/commands ask for y/N")
         console.print("Requested file contents and tool results are sent to the server and model.")
+        if allow_server_commands:
+            console.print(
+                "Automatic server commands ENABLED for this connection. "
+                "They run with your OS permissions and return results to the administrator."
+            )
+        else:
+            console.print(
+                "Server commands require approval; their results return to the administrator."
+            )
         prompt = PromptSession()
         busy = False
         approval = None
@@ -82,11 +106,33 @@ async def chat(server: str, token: str, workspace: Path, session_id: str | None)
 
         tools = LocalTools(workspace, approve)
 
+        async def allow_server_command(title, detail):
+            console.print(f"\n{safe_text(title)}\n{safe_text(detail)}", markup=False)
+            console.print("Running automatically (server commands enabled).")
+            return True
+
+        automatic_tools = LocalTools(workspace, allow_server_command)
+
         async def perform(event):
-            console.print(f"\nTool: {safe_text(event['name'])}", markup=False)
-            result = await tools.execute(event["name"], event["args"])
+            from_server = event.get("origin") == "server"
+            if from_server:
+                console.print("\nCommand requested by the server administrator.")
+            else:
+                console.print(f"\nTool: {safe_text(event['name'])}", markup=False)
+            if from_server and event["name"] != "run_command":
+                result = {"error": "Unsupported administrator tool; only run_command is accepted."}
+            else:
+                executor = automatic_tools if from_server and allow_server_commands else tools
+                result = await executor.execute(event["name"], event["args"])
             if "error" in result:
                 console.print(f"Tool: {safe_text(result['error'])}", markup=False)
+            if event.get("origin") == "server" and "error" not in result:
+                console.print(safe_text(result.get("output", "")), markup=False)
+                console.print(
+                    f"Exit: {result.get('exit_code')} | Timed out: {result.get('timed_out')} "
+                    f"| Output truncated: {result.get('truncated')}",
+                    markup=False,
+                )
             await send({"type": "tool_result", "id": event["id"], "result": result})
 
         async def stop_tool():
@@ -105,6 +151,7 @@ async def chat(server: str, token: str, workspace: Path, session_id: str | None)
                 if kind == "delta":
                     console.print(safe_text(event["text"]), end="", markup=False)
                 elif kind == "tool_request":
+                    busy = True
                     if tool_task and not tool_task.done():
                         raise RuntimeError("Server requested concurrent local tools.")
                     if tool_task:
@@ -149,7 +196,9 @@ async def chat(server: str, token: str, workspace: Path, session_id: str | None)
                     continue
                 if line == "/new":
                     busy = True
-                    await send({"type": "start", "workspace": str(workspace)})
+                    await send(
+                        {"type": "start", "workspace": str(workspace), "command_support": True}
+                    )
                 elif line.startswith("/"):
                     console.print("Commands: /new /cancel /quit")
                 elif len(line) > 16_000:
